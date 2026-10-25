@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="surface" x1="20" y1="8" x2="110" y2="128" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#387B5C"/>
+      <stop offset="1" stop-color="#204E3B"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#surface)"/>
+  <!-- The arch is the SSH tunnel; opposing arrows carry traffic through it. -->
+  <path d="M35 96V57a29 29 0 0 1 58 0v39" stroke="#D4EBDD" stroke-width="8" stroke-linecap="round"/>
+  <path d="M24 61h79m-10-10 10 10-10 10" stroke="#F8FCF9" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M104 84H25m10-10L25 84l10 10" stroke="#88D4AC" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
