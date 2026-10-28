@@ -270,3 +270,8 @@ pub async fn stop_all_forwards(
 pub async fn tunnel_statuses(state: State<'_, AppState>) -> AppResult<Vec<TunnelStatus>> {
     Ok(state.tunnels.statuses().await)
 }
+
+#[tauri::command]
+pub async fn reconnect_forward(state: State<'_, AppState>, rule_id: String) -> AppResult<()> {
+    state.tunnels.reconnect(&rule_id).await
+}

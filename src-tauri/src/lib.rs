@@ -36,6 +36,7 @@ pub fn run() {
             commands::trust_host_key,
             commands::start_forward,
             commands::stop_forward,
+            commands::reconnect_forward,
             commands::stop_all_forwards,
             commands::tunnel_statuses,
         ])

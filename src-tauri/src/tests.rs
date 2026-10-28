@@ -81,12 +81,19 @@ struct Fixture {
     connection: Connection,
     key: PrivateKey,
     fingerprint: String,
+    server_key: PrivateKey,
     shutdown: server::RunningServerHandle,
     task: JoinHandle<()>,
 }
 impl Fixture {
     async fn new() -> Self {
-        let server_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        Self::new_on(
+            0,
+            PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap(),
+        )
+        .await
+    }
+    async fn new_on(port: u16, server_key: PrivateKey) -> Self {
         let fingerprint = server_key
             .public_key()
             .fingerprint(HashAlg::Sha256)
@@ -95,10 +102,10 @@ impl Fixture {
         let mut server = TestServer {
             accepted_key: key.public_key().clone(),
         };
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let config = Arc::new(server::Config {
-            keys: vec![server_key],
+            keys: vec![server_key.clone()],
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             ..Default::default()
@@ -125,6 +132,7 @@ impl Fixture {
             },
             key,
             fingerprint,
+            server_key,
             shutdown,
             task,
         }
@@ -375,7 +383,7 @@ async fn occupied_port_cancellation_and_disconnect_are_reported() {
                 .statuses()
                 .await
                 .iter()
-                .any(|s| s.rule_id == active.id && s.state == "error")
+                .any(|s| s.rule_id == active.id && s.state == "reconnecting")
             {
                 break;
             }
@@ -384,6 +392,13 @@ async fn occupied_port_cancellation_and_disconnect_are_reported() {
     })
     .await
     .unwrap();
+    assert!(manager.active_for(&fixture.connection.id).await);
+    assert!(
+        TcpListener::bind(("127.0.0.1", active.local_port))
+            .await
+            .is_err()
+    );
+    manager.stop(&active.id).await.unwrap();
     assert!(
         TcpListener::bind(("127.0.0.1", active.local_port))
             .await
@@ -581,4 +596,146 @@ async fn shutdown_drains_running_and_starting_tunnels_and_rejects_new_launches()
         .unwrap_err();
     assert!(rejected.message.contains("应用正在退出"));
     echo.abort();
+}
+
+async fn wait_for_state(manager: &TunnelManager, id: &str, state: &str) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if manager
+                .statuses()
+                .await
+                .iter()
+                .any(|s| s.rule_id == id && s.state == state)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_recovers_forwarding_and_clears_error() {
+    let fixture = Fixture::new().await;
+    let (remote, echo) = echo_server().await;
+    let manager = Arc::new(TunnelManager::default());
+    let rule = rule(free_port().await, remote, "127.0.0.1");
+    manager
+        .launch(
+            fixture.connection.clone(),
+            rule.clone(),
+            fixture.credentials(),
+            Some(fixture.fingerprint.clone()),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.shutdown.shutdown("Simulated disconnect".into());
+    wait_for_state(&manager, &rule.id, "reconnecting").await;
+    // The old listener is closed by the server shutdown before this state is observed.
+    let recovered = Fixture::new_on(fixture.connection.port, fixture.server_key.clone()).await;
+    wait_for_state(&manager, &rule.id, "running").await;
+    let status = manager.statuses().await.pop().unwrap();
+    assert!(status.last_error.is_none());
+    assert!(status.next_retry_at.is_none());
+    let mut client = TcpStream::connect(("127.0.0.1", rule.local_port))
+        .await
+        .unwrap();
+    client.write_all(b"recovered").await.unwrap();
+    let mut bytes = [0; 9];
+    timeout(Duration::from_secs(3), client.read_exact(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes, b"recovered");
+    manager.shutdown().await.unwrap();
+    drop(recovered);
+    echo.abort();
+}
+
+#[tokio::test]
+async fn immediate_reconnect_interrupts_wait_and_handshake_and_shutdown_cancels_it() {
+    let fixture = Fixture::new().await;
+    let manager = Arc::new(TunnelManager::default());
+    let rule = rule(free_port().await, 8080, "127.0.0.1");
+    manager
+        .launch(
+            fixture.connection.clone(),
+            rule.clone(),
+            fixture.credentials(),
+            Some(fixture.fingerprint.clone()),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.shutdown.shutdown("Simulated disconnect".into());
+    wait_for_state(&manager, &rule.id, "reconnecting").await;
+    let hanging = TcpListener::bind(("127.0.0.1", fixture.connection.port))
+        .await
+        .unwrap();
+    manager.reconnect(&rule.id).await.unwrap();
+    let (first, _) = timeout(Duration::from_millis(800), hanging.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    manager.reconnect(&rule.id).await.unwrap();
+    let (second, _) = timeout(Duration::from_millis(800), hanging.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(2), manager.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(manager.statuses().await[0].state, "stopped");
+    assert!(manager.reconnect(&rule.id).await.is_err());
+    assert!(
+        TcpListener::bind(("127.0.0.1", rule.local_port))
+            .await
+            .is_ok()
+    );
+    drop((first, second));
+}
+
+#[tokio::test]
+async fn reconnect_stops_when_server_fingerprint_changes() {
+    let fixture = Fixture::new().await;
+    let manager = Arc::new(TunnelManager::default());
+    let rule = rule(free_port().await, 8080, "127.0.0.1");
+    manager
+        .launch(
+            fixture.connection.clone(),
+            rule.clone(),
+            fixture.credentials(),
+            Some(fixture.fingerprint.clone()),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.shutdown.shutdown("Simulated disconnect".into());
+    wait_for_state(&manager, &rule.id, "reconnecting").await;
+    let changed = Fixture::new_on(
+        fixture.connection.port,
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap(),
+    )
+    .await;
+    wait_for_state(&manager, &rule.id, "error").await;
+    let status = manager.statuses().await.pop().unwrap();
+    assert!(status.last_error.unwrap().contains("指纹已变化"));
+    assert!(status.next_retry_at.is_none());
+    assert!(!manager.active_for(&fixture.connection.id).await);
+    assert!(
+        TcpListener::bind(("127.0.0.1", rule.local_port))
+            .await
+            .is_ok()
+    );
+    drop(changed);
 }

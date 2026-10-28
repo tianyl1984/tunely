@@ -67,6 +67,9 @@ export const api = {
       ? invoke("start_forward", { connectionId, ruleId })
       : nativeOnly();
   },
+  async reconnect(ruleId) {
+    return desktop ? invoke("reconnect_forward", { ruleId }) : nativeOnly();
+  },
   async stop(ruleId) {
     return desktop ? invoke("stop_forward", { ruleId }) : nativeOnly();
   },

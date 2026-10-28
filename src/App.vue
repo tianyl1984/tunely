@@ -34,7 +34,7 @@ let mounted = true;
 const rules = computed(() => connections.value.flatMap((c) => c.rules));
 const hasActive = computed(() =>
   Object.values(statuses.value).some((s) =>
-    ["running", "starting"].includes(s.state),
+    ["running", "starting", "reconnecting"].includes(s.state),
   ),
 );
 const currentConnection = computed(() =>
@@ -49,7 +49,9 @@ function stateOf(rule) {
   return busyRules[rule.id] ? { ...status, state: busyRules[rule.id] } : status;
 }
 function isActive(rule) {
-  return ["running", "starting", "stopping"].includes(stateOf(rule).state);
+  return ["running", "starting", "reconnecting", "stopping"].includes(
+    stateOf(rule).state,
+  );
 }
 function connectionActive(connection) {
   return connection.rules.some(isActive);
@@ -62,6 +64,7 @@ function stateLabel(rule) {
     {
       running: "已开启",
       starting: "连接中",
+      reconnecting: "重连中",
       stopping: "停止中",
       stopped: "已停止",
       error: "连接异常",
@@ -239,6 +242,22 @@ async function startRule(connection, rule) {
   } finally {
     if (busyRules[rule.id] === "starting") delete busyRules[rule.id];
     await refreshStatuses();
+  }
+}
+
+function retryLabel(rule) {
+  const next = stateOf(rule).nextRetryAt;
+  return next
+    ? `${Math.max(0, next - Math.floor(Date.now() / 1000))} 秒后重试`
+    : "正在重新连接…";
+}
+
+async function reconnectRule(rule) {
+  try {
+    await api.reconnect(rule.id);
+    await refreshStatuses();
+  } catch (cause) {
+    notify(errorMessage(cause), "error");
   }
 }
 
@@ -593,12 +612,18 @@ onBeforeUnmount(() => {
                   <span class="status-badge" :class="stateOf(rule).state"
                     ><span
                       v-if="
-                        ['starting', 'stopping'].includes(stateOf(rule).state)
+                        ['starting', 'reconnecting', 'stopping'].includes(
+                          stateOf(rule).state,
+                        )
                       "
                       class="spinner"
                     /><span v-else class="status-dot" />{{
                       stateLabel(rule)
                     }}</span
+                  ><span
+                    v-if="stateOf(rule).state === 'reconnecting'"
+                    class="stream-count"
+                    >{{ retryLabel(rule) }}</span
                   ><span
                     v-if="stateOf(rule).activeStreams > 0"
                     class="stream-count"
@@ -610,7 +635,7 @@ onBeforeUnmount(() => {
                     class="toggle"
                     :class="{
                       on: isActive(rule),
-                      pending: ['starting', 'stopping'].includes(
+                      pending: ['starting', 'reconnecting', 'stopping'].includes(
                         stateOf(rule).state,
                       ),
                     }"
@@ -640,6 +665,14 @@ onBeforeUnmount(() => {
                   <Icon name="alert" :size="13" /><span>{{
                     stateOf(rule).lastError
                   }}</span>
+                  <button
+                    v-if="stateOf(rule).state === 'reconnecting'"
+                    class="text-button reconnect-button"
+                    :disabled="!!busyGroups[connection.id]"
+                    @click="reconnectRule(rule)"
+                  >
+                    立刻重连
+                  </button>
                 </div>
               </div>
             </div>
